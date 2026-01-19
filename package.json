@@ -1,0 +1,19 @@
+{
+  "name": "agr-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "worker": "node worker.mjs",
+    "worker:test": "node worker-hit-endpoint.mjs"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "axios-cookiejar-support": "^6.0.4",
+    "cheerio": "^1.0.0",
+    "express": "^4.19.2",
+    "firebase-admin": "^13.6.0",
+    "tough-cookie": "^4.1.4"
+  }
+}

@@ -1,0 +1,41 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    container_name: agr-api
+    env_file: .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./secrets:/app/secrets:ro
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: ["node", "server.mjs"]
+
+  worker:
+    build: .
+    container_name: agr-worker
+    env_file: .env
+    depends_on:
+      - api
+    environment:
+      - CHECK_URL=http://api:3000/api/cron/check-movements
+      - INTERVAL_MS=60000
+      - PUSH_TOPIC=canjes
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/firebase-service-account.json
+    volumes:
+      - ./data:/app/data
+      - ./secrets:/app/secrets:ro
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: ["node", "worker.mjs"]
