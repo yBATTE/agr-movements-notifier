@@ -2,18 +2,36 @@
 import axios from "axios";
 import { sendTopicPush } from "./fcm.mjs";
 
+// ✅ En docker, lo normal es que sea "http://api:3000/..."
+// Si lo corrés fuera de docker, podés usar localhost por env.
 const ENDPOINT =
-  process.env.CHECK_URL || "http://localhost:3000/api/cron/check-movements";
+  process.env.CHECK_URL || "http://api:3000/api/cron/check-movements";
 
 const INTERVAL_MS = Number(process.env.INTERVAL_MS || 60000);
 const TOPIC = process.env.PUSH_TOPIC || "canjes";
 
 let running = false;
 
-function digestMessage(newItems) {
-  if (!newItems?.length) return "";
-  const last = newItems[0];
-  return `${newItems.length} canjes nuevos. Último: ${last.documento} - ${last.recompensa}`;
+function cleanRewardName(rewardName, recompensaRaw) {
+  const base = String(rewardName || recompensaRaw || "").trim();
+  return base.replace(/^\(\d+\)\s*/, "").replace(/\s+/g, " ").trim();
+}
+
+function buildBody(newItems = []) {
+  if (!newItems.length) return "";
+
+  const lines = newItems.slice(0, 3).map((it) => {
+    const entidad = it.entidad || "Entidad";
+    const cant = Number(it.cantidad || 1);
+    const reward = cleanRewardName(it.rewardName, it.recompensa);
+
+    return `• ${entidad}: ${cant}x ${reward}`;
+  });
+
+  const extra = newItems.length - lines.length;
+  if (extra > 0) lines.push(`+${extra} más`);
+
+  return lines.join("\n");
 }
 
 async function tick() {
@@ -32,26 +50,24 @@ async function tick() {
       return;
     }
 
-    if (newCount > 0) {
+    if (Number(newCount) > 0) {
       console.log(`🚀 ${stamp} | NUEVOS: ${newCount}`);
 
-      const msg = digestMessage(newItems);
-      console.log("📣 DIGEST:", msg);
+      const body = buildBody(newItems);
+      const title =
+        Number(newCount) === 1 ? "Nuevo canje" : `${newCount} canjes nuevos`;
 
-      // 🔥 PUSH REAL
-      const title = "Grupo GEN Premios";
-      const body = msg;
+      console.log("📣 PUSH BODY:\n" + body);
 
-      // Data útil para deep-link luego
       const last = newItems?.[0] ?? null;
 
       const pushId = await sendTopicPush({
         topic: TOPIC,
-        title,
-        body,
+        title: "Grupo GEN Premios",
+        body: body || "Hay nuevos canjes.",
         data: {
           type: "NEW_REDEEMS",
-          newCount: newCount,
+          newCount: String(newCount),
           lastReceipt: last?.receiptId ?? "",
           lastReward: last?.rewardId ?? "",
           lastEntity: last?.entidad ?? "",

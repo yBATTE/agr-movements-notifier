@@ -8,12 +8,31 @@ import fs from "fs";
 import path from "path";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT || 3000);
 
 const BASE = "https://adm.agrcloud.com.ar";
-const MOVEMENTS_URL =
-  "/filtered/items/movements/details/service/2" +
-  "?startDate=2026-01-01&endDate=2026-01-19T23:59:59&orderBy=date-desc";
+
+// ✅ Lookback dinámico (hoy + últimos N días)
+const LOOKBACK_DAYS = Number(process.env.MOVEMENTS_LOOKBACK_DAYS || 2);
+
+// ✅ Solo movimientos con “Recibo de canje #XXXX”
+const ONLY_RECEIPTS = String(process.env.ONLY_RECEIPTS || "true") === "true";
+
+// ✅ Ignorar recompensas por ID (los 4 que me pasaste)
+const IGNORE_REWARD_IDS = new Set(
+  String(process.env.IGNORE_REWARD_IDS || "1062,1063,1064")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
+// ✅ (Opcional extra) Ignorar por texto (por si cambia el ID)
+const IGNORE_REWARD_TERMS = String(
+  process.env.IGNORE_REWARD_TERMS || "cafe,gaseosa + alfajor"
+)
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 
 // Estado persistente
 const STATE_FILE = process.env.STATE_FILE || "./data/state.json";
@@ -47,6 +66,44 @@ function saveState(state) {
 }
 
 // -------------------------
+// Date helpers (Argentina)
+// -------------------------
+const TZ_AR = "America/Argentina/Buenos_Aires";
+
+// YYYY-MM-DD en timezone Argentina
+function ymdInAR(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ_AR,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+
+  return `${y}-${m}-${d}`;
+}
+
+function subDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() - days);
+  return d;
+}
+
+function buildMovementsUrl() {
+  const now = new Date();
+  const end = ymdInAR(now);
+  const start = ymdInAR(subDays(now, LOOKBACK_DAYS));
+
+  return (
+    "/filtered/items/movements/details/service/2" +
+    `?startDate=${start}&endDate=${end}T23:59:59&orderBy=date-desc`
+  );
+}
+
+// -------------------------
 // Parse helpers
 // -------------------------
 function extractToken(html) {
@@ -67,6 +124,35 @@ function normalizeText(t) {
   return (t || "").trim().replace(/\s+/g, " ");
 }
 
+// para comparar sin tildes
+function normalizeNoAccents(s) {
+  return (s || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .trim();
+}
+
+function cleanRewardName(recompensa) {
+  // "(1064) GASEOSA + ALFAJOR" => "GASEOSA + ALFAJOR"
+  return normalizeText(String(recompensa || "").replace(/^\(\d+\)\s*/, ""));
+}
+
+function shouldIgnore(row) {
+  if (!row) return false;
+
+  // por ID
+  if (row.rewardId && IGNORE_REWARD_IDS.has(String(row.rewardId))) return true;
+
+  // por texto
+  const name = normalizeNoAccents(row.rewardName || row.recompensa || "");
+  if (!name) return false;
+
+  return IGNORE_REWARD_TERMS.some((term) =>
+    name.includes(normalizeNoAccents(term))
+  );
+}
+
 function parseRows(html) {
   const $ = cheerio.load(html);
   const rows = [];
@@ -82,15 +168,26 @@ function parseRows(html) {
     const documento = normalizeText($(tds[3]).text());
     const recompensa = normalizeText($(tds[4]).text());
 
-    // Solo canjes (Egreso)
+    // ✅ cantidad suele ser la última columna
+    const lastTd = $(tds[tds.length - 1]).text();
+    const cantidadRaw = normalizeText(lastTd);
+    const cantidad = Number.parseInt(cantidadRaw, 10) || 1;
+
+    // ✅ Solo egresos
     if (movimiento.toLowerCase() !== "egreso") return;
 
+    // ✅ Solo canjes con recibo
     const receiptId = documento.match(/#(\d+)/)?.[1] || "UNK";
+    if (ONLY_RECEIPTS && receiptId === "UNK") return;
+
     const rewardId = recompensa.match(/\((\d+)\)/)?.[1] || "UNK";
+    const rewardName = cleanRewardName(recompensa);
 
-    const externalId = `${entidad}|${receiptId}|${rewardId}`;
+    // ✅ ID externo para “ya lo vi”
+    // Le sumo cantidad para que no se pise si hay 2 iguales
+    const externalId = `${entidad}|${receiptId}|${rewardId}|${cantidad}`;
 
-    rows.push({
+    const row = {
       externalId,
       fecha,
       entidad,
@@ -98,8 +195,15 @@ function parseRows(html) {
       documento,
       recompensa,
       receiptId,
-      rewardId
-    });
+      rewardId,
+      rewardName,
+      cantidad,
+    };
+
+    // ✅ ignorar cosas que NO querés notificar
+    if (shouldIgnore(row)) return;
+
+    rows.push(row);
   });
 
   return rows;
@@ -127,10 +231,10 @@ async function loginAndFetchMovements() {
       headers: {
         "User-Agent": "Mozilla/5.0",
         Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
       maxRedirects: 0,
-      validateStatus: (s) => s >= 200 && s < 400
+      validateStatus: (s) => s >= 200 && s < 400,
     })
   );
 
@@ -149,8 +253,8 @@ async function loginAndFetchMovements() {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Referer: BASE + "/Account/SignIn",
-      Origin: BASE
-    }
+      Origin: BASE,
+    },
   });
 
   if (loginRes.status !== 302) {
@@ -172,13 +276,14 @@ async function loginAndFetchMovements() {
       headers: {
         "User-Agent": "Mozilla/5.0",
         Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
-      maxRedirects: 5
+      maxRedirects: 5,
     })
   );
 
-  const movRes = await clientFetch.get(MOVEMENTS_URL);
+  const url = buildMovementsUrl();
+  const movRes = await clientFetch.get(url);
 
   if (looksLikeLogin(movRes.data)) {
     throw new Error("Movements devolvió login (sesión inválida)");
@@ -191,14 +296,32 @@ async function loginAndFetchMovements() {
 // -------------------------
 // Endpoints
 // -------------------------
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.get("/api/cron/check-movements", async (req, res) => {
+// ✅ Debug: ver últimos 20 sin tocar state
+app.get("/api/cron/peek-movements", async (_req, res) => {
+  try {
+    const rows = await loginAndFetchMovements();
+    return res.json({
+      ok: true,
+      lookbackDays: LOOKBACK_DAYS,
+      onlyReceipts: ONLY_RECEIPTS,
+      ignoredIds: Array.from(IGNORE_REWARD_IDS),
+      ignoredTerms: IGNORE_REWARD_TERMS,
+      items: rows.slice(0, 20),
+      lastCount: rows.length,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+app.get("/api/cron/check-movements", async (_req, res) => {
   if (running) {
     return res.status(429).json({
       ok: false,
       reason: "locked",
-      message: "Ya hay un chequeo corriendo"
+      message: "Ya hay un chequeo corriendo",
     });
   }
 
@@ -216,7 +339,7 @@ app.get("/api/cron/check-movements", async (req, res) => {
       saveState({
         initialized: true,
         lastSeenIds: latestIds,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
       });
 
       return res.json({
@@ -224,7 +347,7 @@ app.get("/api/cron/check-movements", async (req, res) => {
         baseline: true,
         newCount: 0,
         newItems: [],
-        lastCount: rows.length
+        lastCount: rows.length,
       });
     }
 
@@ -236,7 +359,7 @@ app.get("/api/cron/check-movements", async (req, res) => {
     saveState({
       initialized: true,
       lastSeenIds: latestIds,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     });
 
     return res.json({
@@ -244,12 +367,12 @@ app.get("/api/cron/check-movements", async (req, res) => {
       baseline: false,
       newCount: newItems.length,
       newItems,
-      lastCount: rows.length
+      lastCount: rows.length,
     });
   } catch (e) {
     return res.status(500).json({
       ok: false,
-      error: e?.message || String(e)
+      error: e?.message || String(e),
     });
   } finally {
     running = false;
@@ -259,6 +382,13 @@ app.get("/api/cron/check-movements", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ Server ON: http://localhost:${PORT}`);
   console.log(`✅ Health: http://localhost:${PORT}/health`);
+  console.log(`✅ Peek: http://localhost:${PORT}/api/cron/peek-movements`);
   console.log(`✅ Endpoint: http://localhost:${PORT}/api/cron/check-movements`);
   console.log(`💾 State file: ${STATE_FILE}`);
+  console.log(
+    `📆 Lookback: ${LOOKBACK_DAYS} días | OnlyReceipts=${ONLY_RECEIPTS}`
+  );
+  console.log(
+    `🚫 Ignorados IDs: ${Array.from(IGNORE_REWARD_IDS).join(", ")}`
+  );
 });

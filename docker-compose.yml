@@ -1,12 +1,15 @@
-version: "3.8"
-
 services:
   api:
     build: .
     container_name: agr-api
     env_file: .env
+    environment:
+      - MOVEMENTS_LOOKBACK_DAYS=2
+      - ONLY_RECEIPTS=true
+      - IGNORE_REWARD_IDS=1062,1063,1064
+      - IGNORE_REWARD_TERMS=cafe,gaseosa + alfajor
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./data:/app/data
       - ./secrets:/app/secrets:ro
@@ -17,18 +20,23 @@ services:
         max-size: "10m"
         max-file: "3"
     command: ["node", "server.mjs"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   worker:
     build: .
     container_name: agr-worker
     env_file: .env
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     environment:
       - CHECK_URL=http://api:3000/api/cron/check-movements
       - INTERVAL_MS=60000
       - PUSH_TOPIC=canjes
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/firebase-service-account.json
     volumes:
       - ./data:/app/data
       - ./secrets:/app/secrets:ro
