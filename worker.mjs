@@ -10,6 +10,18 @@ const ENDPOINT =
 const INTERVAL_MS = Number(process.env.INTERVAL_MS || 60000);
 const TOPIC = process.env.PUSH_TOPIC || "canjes";
 
+// ✅ Trigger scraper cuando hay nuevos canjes
+const TRIGGER_SCRAPER_ON_NEW =
+  String(process.env.TRIGGER_SCRAPER_ON_NEW || "1") === "1";
+
+// ✅ Por defecto: run-movements (más liviano que run-all)
+// Podés cambiarlo por env: SCRAPER_ENDPOINT=http://agr-scrapers:8080/run-all
+const SCRAPER_ENDPOINT =
+  process.env.SCRAPER_ENDPOINT || "http://agr-scrapers:8080/run-movements";
+
+// ✅ Timeout para el scraper (default 5 min)
+const SCRAPER_TIMEOUT_MS = Number(process.env.SCRAPER_TIMEOUT_MS || 300000);
+
 let running = false;
 
 function cleanRewardName(rewardName, recompensaRaw) {
@@ -34,6 +46,33 @@ function buildBody(newItems = []) {
   return lines.join("\n");
 }
 
+async function triggerScraper() {
+  if (!TRIGGER_SCRAPER_ON_NEW) return;
+
+  const stamp = new Date().toLocaleString();
+  console.log(`🕷️ ${stamp} | Trigger Scraper -> ${SCRAPER_ENDPOINT}`);
+
+  try {
+    const res = await axios.get(SCRAPER_ENDPOINT, {
+      timeout: SCRAPER_TIMEOUT_MS,
+    });
+
+    const txt =
+      typeof res.data === "string"
+        ? res.data
+        : JSON.stringify(res.data || {});
+
+    console.log(`✅ ${stamp} | Scraper OK -> ${txt}`);
+  } catch (e) {
+    console.log(
+      "💥",
+      new Date().toLocaleString(),
+      "| Scraper error:",
+      e?.message || e
+    );
+  }
+}
+
 async function tick() {
   if (running) return;
   running = true;
@@ -54,8 +93,6 @@ async function tick() {
       console.log(`🚀 ${stamp} | NUEVOS: ${newCount}`);
 
       const body = buildBody(newItems);
-      const title =
-        Number(newCount) === 1 ? "Nuevo canje" : `${newCount} canjes nuevos`;
 
       console.log("📣 PUSH BODY:\n" + body);
 
@@ -75,6 +112,9 @@ async function tick() {
       });
 
       console.log("✅ PUSH enviado:", pushId);
+
+      // ✅ después del push, dispara el scraper (para que la app vea datos actualizados)
+      await triggerScraper();
     } else {
       console.log(`✅ ${stamp} | Sin nuevos`);
     }
@@ -86,6 +126,14 @@ async function tick() {
 }
 
 console.log("🚀 Worker ON ->", ENDPOINT);
+console.log("🧩 Topic ->", TOPIC);
+
+if (TRIGGER_SCRAPER_ON_NEW) {
+  console.log("🕷️ Trigger ON ->", SCRAPER_ENDPOINT);
+} else {
+  console.log("🕷️ Trigger OFF");
+}
+
 await tick();
 
 // corre cada X ms (con jitter para no ser robot)
